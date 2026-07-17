@@ -40,7 +40,7 @@ const server = http.createServer(async (req, res) => {
     req.on('data', (c) => { raw += c; if (raw.length > 500000) req.destroy(); });
     req.on('end', async () => {
       try {
-        const { image = '', text = '' } = JSON.parse(raw || '{}');
+        const { image = '', text = '', mode = '' } = JSON.parse(raw || '{}');
         if (!image && !text) return send(res, 400, { error: 'need image or text' });
         const content = [];
         if (image) {
@@ -48,18 +48,27 @@ const server = http.createServer(async (req, res) => {
           if (!m) return send(res, 400, { error: 'image must be a jpeg/png/webp data URL' });
           content.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } });
         }
-        content.push({ type: 'text', text: (image ? 'Identify the wine on this label.' : 'Identify this wine: "' + text.slice(0, 300) + '".') +
+        if (mode === 'menu') {
+          content.push({ type: 'text', text: 'This is a photo of a restaurant wine list. Extract every wine you can read. Reply with ONLY a JSON object, no markdown fences: {"wines":[{"name":"producer + cuvee as printed","vintage":"","region":"","style":"red|white|rosé|sparkling|orange if inferable","price":"as printed or empty"}]}. Max 40 wines, preserve menu order. If it is not a wine list, return {"wines":[]}.' });
+        } else {
+          content.push({ type: 'text', text: (image ? 'Identify the wine on this label.' : 'Identify this wine: "' + text.slice(0, 300) + '".') +
           ' Reply with ONLY a JSON object, no markdown fences, with keys: producer, cuvee, vintage (string, "" if unknown), region, country, grapes (array of strings), style (e.g. "red, full-bodied"), summary (2 sentences max: the winemaker/estate and what this bottle is like), confidence ("high"|"medium"|"low"). If you cannot identify it, set confidence "low" and give your best reading of the label text.' });
+        }
         const r = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-          body: JSON.stringify({ model: MODEL, max_tokens: 500, messages: [{ role: 'user', content }] }),
+          body: JSON.stringify({ model: MODEL, max_tokens: mode === 'menu' ? 1500 : 500, messages: [{ role: 'user', content }] }),
         });
         const data = await r.json();
         if (!r.ok) return send(res, 502, { error: data?.error?.message || 'upstream error' });
         const txt = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+        const cleaned = txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+        if (mode === 'menu') {
+          try { const j = JSON.parse(cleaned); return send(res, 200, { wines: Array.isArray(j.wines) ? j.wines.slice(0, 40) : [] }); }
+          catch (e) { return send(res, 200, { wines: [] }); }
+        }
         let wine;
-        try { wine = JSON.parse(txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim()); }
+        try { wine = JSON.parse(cleaned); }
         catch (e) { return send(res, 200, { wine: { producer: '', cuvee: text.slice(0, 80), vintage: '', region: '', country: '', grapes: [], style: '', summary: txt.slice(0, 240), confidence: 'low' } }); }
         send(res, 200, { wine });
       } catch (e) { send(res, 500, { error: 'server error' }); }
