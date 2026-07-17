@@ -1,0 +1,8 @@
+{
+  "name": "mtlqc-concierge",
+  "version": "1.0.0",
+  "description": "Claude concierge proxy for the Montreal+Quebec trip app",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=18" }
+}
