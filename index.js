@@ -34,6 +34,45 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, '');
   if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, model: MODEL });
 
+  if (req.method === 'POST' && req.url === '/meal') {
+    if ((req.headers['x-trip-key'] || '') !== TRIP_KEY) return send(res, 401, { error: 'bad trip key' });
+    let raw = '';
+    req.on('data', (c) => { raw += c; if (raw.length > 500000) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const { image = '', mode = '', dish = null, restaurant = '' } = JSON.parse(raw || '{}');
+        const content = [];
+        if (mode === 'menu') {
+          if (!image) return send(res, 400, { error: 'need image' });
+          const m = image.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/);
+          if (!m) return send(res, 400, { error: 'image must be a jpeg/png/webp data URL' });
+          content.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } });
+          content.push({ type: 'text', text: 'This is a photo of a restaurant food menu. Extract the dishes you can read. Reply with ONLY a JSON object, no markdown fences: {"restaurant":"name if visible else empty","dishes":[{"name":"","description":"short, as printed or condensed","price":"as printed or empty","course":"starter|main|dessert|side|other"}]}. Max 40 dishes, menu order. If not a food menu, return {"restaurant":"","dishes":[]}.' });
+        } else if (mode === 'recipe') {
+          if (!dish || !dish.name) return send(res, 400, { error: 'need dish' });
+          content.push({ type: 'text', text: 'Create an estimated home-cook re-creation of this restaurant dish' + (restaurant ? ' from ' + String(restaurant).slice(0, 80) : '') + ': "' + String(dish.name).slice(0, 120) + '"' + (dish.description ? ' — described on the menu as: "' + String(dish.description).slice(0, 240) + '"' : '') + '. Assume Québec/French-leaning technique where fitting. Reply with ONLY a JSON object, no markdown fences: {"title":"","serves":"","time":"","ingredients":["item with quantity", ...],"steps":["...", ...],"notes":"1-2 sentences: what makes the restaurant version special and the key to nailing it"}. Max 14 ingredients, max 9 steps, home-kitchen realistic.' });
+        } else return send(res, 400, { error: 'mode must be menu or recipe' });
+        const r = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+          body: JSON.stringify({ model: MODEL, max_tokens: mode === 'menu' ? 1600 : 1200, messages: [{ role: 'user', content }] }),
+        });
+        const data = await r.json();
+        if (!r.ok) return send(res, 502, { error: data?.error?.message || 'upstream error' });
+        const txt = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+        const cleaned = txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+        try {
+          const j = JSON.parse(cleaned);
+          if (mode === 'menu') return send(res, 200, { restaurant: j.restaurant || '', dishes: Array.isArray(j.dishes) ? j.dishes.slice(0, 40) : [] });
+          return send(res, 200, { recipe: j });
+        } catch (e) {
+          return send(res, 200, mode === 'menu' ? { restaurant: '', dishes: [] } : { recipe: null, error: 'could not draft a recipe' });
+        }
+      } catch (e) { send(res, 500, { error: 'server error' }); }
+    });
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/wine') {
     if ((req.headers['x-trip-key'] || '') !== TRIP_KEY) return send(res, 401, { error: 'bad trip key' });
     let raw = '';
