@@ -34,6 +34,39 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, '');
   if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, model: MODEL });
 
+  if (req.method === 'POST' && req.url === '/wine') {
+    if ((req.headers['x-trip-key'] || '') !== TRIP_KEY) return send(res, 401, { error: 'bad trip key' });
+    let raw = '';
+    req.on('data', (c) => { raw += c; if (raw.length > 500000) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const { image = '', text = '' } = JSON.parse(raw || '{}');
+        if (!image && !text) return send(res, 400, { error: 'need image or text' });
+        const content = [];
+        if (image) {
+          const m = image.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/);
+          if (!m) return send(res, 400, { error: 'image must be a jpeg/png/webp data URL' });
+          content.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } });
+        }
+        content.push({ type: 'text', text: (image ? 'Identify the wine on this label.' : 'Identify this wine: "' + text.slice(0, 300) + '".') +
+          ' Reply with ONLY a JSON object, no markdown fences, with keys: producer, cuvee, vintage (string, "" if unknown), region, country, grapes (array of strings), style (e.g. "red, full-bodied"), summary (2 sentences max: the winemaker/estate and what this bottle is like), confidence ("high"|"medium"|"low"). If you cannot identify it, set confidence "low" and give your best reading of the label text.' });
+        const r = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+          body: JSON.stringify({ model: MODEL, max_tokens: 500, messages: [{ role: 'user', content }] }),
+        });
+        const data = await r.json();
+        if (!r.ok) return send(res, 502, { error: data?.error?.message || 'upstream error' });
+        const txt = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+        let wine;
+        try { wine = JSON.parse(txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim()); }
+        catch (e) { return send(res, 200, { wine: { producer: '', cuvee: text.slice(0, 80), vintage: '', region: '', country: '', grapes: [], style: '', summary: txt.slice(0, 240), confidence: 'low' } }); }
+        send(res, 200, { wine });
+      } catch (e) { send(res, 500, { error: 'server error' }); }
+    });
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/chat') {
     if ((req.headers['x-trip-key'] || '') !== TRIP_KEY) return send(res, 401, { error: 'bad trip key' });
     let raw = '';
